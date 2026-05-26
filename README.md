@@ -28,7 +28,7 @@ Or start with the flag:
 pi --plan
 ```
 
-Or use the shortcut: `Ctrl+Alt+P`
+Or use the shortcut: `Shift+Tab`
 
 Ask the agent to work on something. It will explore the codebase, ask clarifying questions if needed, and write a plan. You review the plan and choose:
 
