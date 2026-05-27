@@ -1,24 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Key } from "@earendil-works/pi-tui";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
-
-const PLAN_TOOLS = ["read", "bash", "grep", "find", "ls", "write_plan"];
-
-const PLAN_PROMPT = `You are in plan mode — read-only exploration before implementation.
-
-Explore the codebase to understand the task. Ask clarifying questions if needed.
-When ready, call write_plan with a concise, actionable plan.
-
-Do not attempt to edit or write files. Use write_plan when you have a plan.`;
+import { readFile } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 
 type Mode = "plan" | "execute";
 
-function sanitizeName(name: string): string {
-  const cleaned = name.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
-  if (!cleaned) throw new Error("Plan name must contain at least one alphanumeric character");
-  return cleaned.slice(0, 64);
+function isInsidePlans(absolutePath: string, plansDir: string): boolean {
+  const rel = relative(plansDir, absolutePath);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 export default function plot(pi: ExtensionAPI) {
@@ -31,28 +21,23 @@ export default function plot(pi: ExtensionAPI) {
     return pi.getFlag("plan") === true ? "plan" : "execute";
   }
 
-  function getActivePlan(ctx: ExtensionContext): string | undefined {
+  function getCurrentPlanPath(ctx: ExtensionContext): string | undefined {
     for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
-      if (entry.type !== "message") continue;
-      const msg = (entry as { message?: { role?: string; toolName?: string; details?: { name?: string } } }).message;
-      if (msg?.role === "toolResult" && msg.toolName === "write_plan") {
-        return msg.details?.name;
+      if (entry.type === "custom" && (entry as { customType?: string }).customType === "plot-plan") {
+        return (entry as { data?: { path?: string } }).data?.path;
       }
     }
     return undefined;
   }
 
-  function applyMode(mode: Mode, activePlan: string | undefined, ctx: ExtensionContext) {
+  function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
     if (mode === "plan") {
-      pi.setActiveTools(PLAN_TOOLS);
       ctx.ui.setStatus("plot", ctx.ui.theme.fg("warning", "plan"));
       ctx.ui.setWidget("plot", undefined);
       return;
     }
-    pi.setActiveTools(pi.getAllTools().map((t) => t.name).filter((n) => n !== "write_plan"));
-    if (activePlan) {
-      ctx.ui.setStatus("plot", ctx.ui.theme.fg("accent", activePlan));
-      const planPath = resolve(ctx.cwd, ".pi/plans", `${activePlan}.md`);
+    if (planPath) {
+      ctx.ui.setStatus("plot", ctx.ui.theme.fg("accent", basename(planPath, ".md")));
       readFile(planPath, "utf8").then((content) => {
         ctx.ui.setWidget("plot", content.split("\n").slice(0, 20));
       }).catch(() => ctx.ui.setWidget("plot", undefined));
@@ -64,8 +49,30 @@ export default function plot(pi: ExtensionAPI) {
 
   function setMode(mode: Mode, ctx: ExtensionContext) {
     pi.appendEntry("plot-mode", { mode });
-    applyMode(mode, getActivePlan(ctx), ctx);
-    ctx.ui.notify(mode === "plan" ? "Plan mode — read-only exploration" : "Execute mode — full access restored");
+    applyMode(mode, getCurrentPlanPath(ctx), ctx);
+
+    if (mode === "plan") {
+      pi.sendMessage(
+        {
+          customType: "plot-mode-banner",
+          content:
+            "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, call exit_planmode for user approval.",
+          display: true,
+        },
+        { triggerTurn: false },
+      );
+    } else {
+      pi.sendMessage(
+        {
+          customType: "plot-mode-banner",
+          content: "[Plan mode ended] Full file access restored.",
+          display: true,
+        },
+        { triggerTurn: false },
+      );
+    }
+
+    ctx.ui.notify(mode === "plan" ? "Plan mode" : "Execute mode");
   }
 
   function togglePlanMode(ctx: ExtensionContext) {
@@ -88,66 +95,97 @@ export default function plot(pi: ExtensionAPI) {
     handler: async (ctx) => togglePlanMode(ctx),
   });
 
-  pi.registerTool({
-    name: "write_plan",
-    label: "Write Plan",
-    description: "Save a plan and prompt for approval. Only callable in plan mode.",
-    promptSnippet: "Save a markdown plan for user review (plan mode only)",
-    promptGuidelines: [
-      "Use write_plan when you have a complete plan and are ready for user review.",
-    ],
-    parameters: Type.Object({
-      name: Type.String({ description: "Short slug for the plan (alphanumeric, dashes, underscores)" }),
-      content: Type.String({ description: "Markdown plan content" }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      if (getMode(ctx) !== "plan") {
-        throw new Error("write_plan can only be called in plan mode");
-      }
+  pi.on("tool_call", async (event, ctx) => {
+    if (getMode(ctx) !== "plan") return;
+    if (event.toolName !== "edit" && event.toolName !== "write") return;
 
-      const name = sanitizeName(params.name);
-      const plansDir = resolve(ctx.cwd, ".pi/plans");
-      const planPath = resolve(plansDir, `${name}.md`);
-      await mkdir(plansDir, { recursive: true });
-      await writeFile(planPath, params.content, "utf8");
+    const rawPath = (event.input as { path?: unknown }).path;
+    if (typeof rawPath !== "string") return;
 
-      let currentContent = params.content;
+    const plansDir = resolve(ctx.cwd, ".pi/plans");
+    const absolutePath = resolve(ctx.cwd, rawPath);
 
-      while (true) {
-        const choice = await ctx.ui.select("Plan ready — what next?", ["Approve", "Edit", "Refine"]);
-
-        if (choice === "Approve") {
-          setMode("execute", ctx);
-          return {
-            content: [{ type: "text", text: `Plan approved. Saved to .pi/plans/${name}.md — implement it now.` }],
-            details: { name, content: currentContent },
-          };
-        }
-
-        if (choice === "Edit") {
-          const edited = await ctx.ui.editor("Edit the plan:", currentContent);
-          if (edited !== undefined) {
-            currentContent = edited;
-            await writeFile(planPath, currentContent, "utf8");
-          }
-          continue;
-        }
-
-        return {
-          content: [{ type: "text", text: `Plan saved to .pi/plans/${name}.md — user wants refinement.` }],
-          details: { name, content: currentContent },
-        };
-      }
-    },
-  });
-
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (getMode(ctx) === "plan") {
-      return { systemPrompt: event.systemPrompt + "\n\n" + PLAN_PROMPT };
+    if (!isInsidePlans(absolutePath, plansDir)) {
+      return {
+        block: true,
+        reason:
+          "Plan mode: only files under .pi/plans/ can be edited or written. Use read and bash to explore code, then write your plan to .pi/plans/<name>.md, then call exit_planmode.",
+      };
     }
   });
 
+  pi.on("tool_result", async (event, ctx) => {
+    if (event.isError) return;
+    if (event.toolName !== "edit" && event.toolName !== "write") return;
+
+    const rawPath = (event.input as { path?: unknown }).path;
+    if (typeof rawPath !== "string") return;
+
+    const plansDir = resolve(ctx.cwd, ".pi/plans");
+    const absolutePath = resolve(ctx.cwd, rawPath);
+    if (!isInsidePlans(absolutePath, plansDir)) return;
+
+    pi.appendEntry("plot-plan", { path: absolutePath });
+  });
+
+  pi.registerTool({
+    name: "exit_planmode",
+    label: "Exit Plan Mode",
+    description:
+      "Request user approval for the plan you've written, then hand off to a fresh execute-mode session. Only callable in plan mode.",
+    promptSnippet: "Request approval and hand off to execute mode (plan mode only).",
+    promptGuidelines: [
+      "Call exit_planmode when you've written a plan file under .pi/plans/ and the user is ready to implement it.",
+    ],
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      if (getMode(ctx) !== "plan") {
+        throw new Error("exit_planmode can only be called while in plan mode.");
+      }
+
+      const planPath = getCurrentPlanPath(ctx);
+      if (!planPath) {
+        throw new Error(
+          "No plan file has been written yet. Use the write tool to create a plan under .pi/plans/ first.",
+        );
+      }
+
+      const planContent = await readFile(planPath, "utf8");
+      const ok = await ctx.ui.confirm("Implement this plan?", basename(planPath));
+
+      if (!ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "User rejected the plan. Ask them what to change, then revise the plan file.",
+            },
+          ],
+          details: { path: planPath, approved: false },
+        };
+      }
+
+      const parentSession = ctx.sessionManager.getSessionFile();
+      await ctx.newSession({
+        parentSession: parentSession ?? undefined,
+        withSession: async (replacementCtx) => {
+          pi.appendEntry("plot-mode", { mode: "execute" });
+          applyMode("execute", planPath, replacementCtx);
+          replacementCtx.sendUserMessage(planContent);
+        },
+      });
+
+      return {
+        content: [
+          { type: "text", text: "Approved. Handed off to a fresh session with the plan as the first message." },
+        ],
+        details: { path: planPath, approved: true },
+        terminate: true,
+      };
+    },
+  });
+
   pi.on("session_start", async (_event, ctx) => {
-    applyMode(getMode(ctx), getActivePlan(ctx), ctx);
+    applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
   });
 }
