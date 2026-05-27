@@ -46,7 +46,7 @@ export default function plot(pi: ExtensionAPI) {
       pi.setActiveTools(PLAN_TOOLS);
       ctx.ui.notify("Plan mode — read-only exploration");
     } else {
-      pi.setActiveTools(undefined);
+      pi.setActiveTools(pi.getAllTools().map((t) => t.name));
       ctx.ui.notify("Execute mode — full access restored");
     }
     updateStatus(ctx);
@@ -106,7 +106,7 @@ export default function plot(pi: ExtensionAPI) {
         if (choice === "Approve") {
           planMode = false;
           activePlan = params.name;
-          pi.setActiveTools(undefined);
+          pi.setActiveTools(pi.getAllTools().map((t) => t.name));
           updateStatus(ctx);
           setWidget(ctx);
           decided = true;
