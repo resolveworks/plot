@@ -83,7 +83,7 @@ export default function plot(pi: ExtensionAPI) {
     handler: async (_args, ctx) => togglePlanMode(ctx),
   });
 
-  pi.registerShortcut(Key.ctrlAlt("p"), {
+  pi.registerShortcut(Key.shift("tab"), {
     description: "Toggle plan mode",
     handler: async (ctx) => togglePlanMode(ctx),
   });
