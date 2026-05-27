@@ -52,12 +52,6 @@ export default function plot(pi: ExtensionAPI) {
     updateStatus(ctx);
   }
 
-  pi.registerFlag("plan", {
-    description: "Start in plan mode",
-    type: "boolean",
-    default: false,
-  });
-
   pi.registerCommand("plan", {
     description: "Toggle plan mode",
     handler: async (_args, ctx) => togglePlanMode(ctx),
@@ -86,14 +80,8 @@ export default function plot(pi: ExtensionAPI) {
       await mkdir(dirname(planPath), { recursive: true });
       await writeFile(planPath, params.content, "utf8");
 
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: "text", text: `Plan saved to .pi/plans/${params.name}.md` }],
-          details: { name: params.name },
-        };
-      }
-
       let currentContent = params.content;
+
       let decided = false;
 
       while (!decided) {
@@ -104,11 +92,6 @@ export default function plot(pi: ExtensionAPI) {
         ]);
 
         if (choice === "Approve") {
-          planMode = false;
-          activePlan = params.name;
-          pi.setActiveTools(pi.getAllTools().map((t) => t.name));
-          updateStatus(ctx);
-          setWidget(ctx);
           decided = true;
         } else if (choice === "Edit") {
           const edited = await ctx.ui.editor("Edit the plan:", currentContent);
@@ -118,13 +101,23 @@ export default function plot(pi: ExtensionAPI) {
           }
         } else {
           // Refine: stay in plan mode, let agent revise
-          decided = true;
+          return {
+            content: [{ type: "text", text: `Plan saved to .pi/plans/${params.name}.md — refining` }],
+            details: { name: params.name, content: currentContent },
+          };
         }
       }
 
+      // Transition to execute mode
+      planMode = false;
+      activePlan = params.name;
+      pi.setActiveTools(pi.getAllTools().map((t) => t.name));
+      updateStatus(ctx);
+      setWidget(ctx);
+
       return {
         content: [{ type: "text", text: `Plan saved to .pi/plans/${params.name}.md` }],
-        details: { name: params.name },
+        details: { name: params.name, content: currentContent },
       };
     },
   });
@@ -148,8 +141,6 @@ export default function plot(pi: ExtensionAPI) {
     if (planEntry?.data) {
       planMode = planEntry.data.planMode;
       activePlan = planEntry.data.activePlan;
-    } else if (pi.getFlag("plan")) {
-      planMode = true;
     }
 
     if (planMode) {

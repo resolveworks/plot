@@ -23,7 +23,6 @@ Two modes. Transitions are deterministic.
 ```
 
 - `/plan` toggles between modes.
-- `--plan` flag starts in plan mode.
 - `Shift+Tab` shortcut toggles.
 - Approving a plan transitions to execute mode automatically.
 - Calling `/plan` during execute returns to plan mode (for replanning).
