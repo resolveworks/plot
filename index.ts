@@ -43,7 +43,7 @@ export default function plot(pi: ExtensionAPI) {
     if (mode === "plan") {
       pi.sendMessage(
         {
-          customType: "plot-mode-banner",
+          customType: "plot",
           content:
             "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, call exit_planmode for user approval.",
           display: true,
@@ -53,7 +53,7 @@ export default function plot(pi: ExtensionAPI) {
     } else {
       pi.sendMessage(
         {
-          customType: "plot-mode-banner",
+          customType: "plot",
           content: "[Plan mode ended] Full file access restored.",
           display: true,
         },
