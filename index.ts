@@ -31,20 +31,9 @@ export default function plot(pi: ExtensionAPI) {
   }
 
   function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
-    if (mode === "plan") {
-      ctx.ui.setStatus("plot", ctx.ui.theme.fg("warning", "plan"));
-      ctx.ui.setWidget("plot", undefined);
-      return;
-    }
-    if (planPath) {
-      ctx.ui.setStatus("plot", ctx.ui.theme.fg("accent", basename(planPath, ".md")));
-      readFile(planPath, "utf8").then((content) => {
-        ctx.ui.setWidget("plot", content.split("\n").slice(0, 20));
-      }).catch(() => ctx.ui.setWidget("plot", undefined));
-    } else {
-      ctx.ui.setStatus("plot", undefined);
-      ctx.ui.setWidget("plot", undefined);
-    }
+    const label = mode === "plan" ? "Plan mode" : "Normal mode";
+    const text = planPath ? `${label} (${basename(planPath, ".md")})` : label;
+    ctx.ui.setStatus("plot", ctx.ui.theme.fg("accent", text));
   }
 
   function setMode(mode: Mode, ctx: ExtensionContext) {
@@ -71,8 +60,6 @@ export default function plot(pi: ExtensionAPI) {
         { triggerTurn: false },
       );
     }
-
-    ctx.ui.notify(mode === "plan" ? "Plan mode" : "Execute mode");
   }
 
   function togglePlanMode(ctx: ExtensionContext) {
