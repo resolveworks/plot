@@ -45,7 +45,7 @@ export default function plot(pi: ExtensionAPI) {
           customType: "plot",
           content:
             "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, run /approve.",
-          display: true,
+          display: false,
         },
         { triggerTurn: false },
       );
@@ -54,7 +54,7 @@ export default function plot(pi: ExtensionAPI) {
         {
           customType: "plot",
           content: "[Plan mode ended] Full file access restored.",
-          display: true,
+          display: false,
         },
         { triggerTurn: false },
       );
