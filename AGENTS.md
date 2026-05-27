@@ -1,81 +1,60 @@
 # AGENTS.md
 
-**plot** is a [pi](https://github.com/earendil-works/pi) extension that adds a plan mode — a read-only phase where the agent explores the codebase and writes a plan before gaining write access.
+**plot** is a [pi](https://github.com/earendil-works/pi) extension that adds a plan mode — a phase where edits are restricted to `.pi/plans/`, so the agent explores and drafts a plan before getting full write access.
 
 ## State Machine
 
-Two modes. Transitions are deterministic.
+Two modes. Transitions are explicit.
 
 ```
-/plan ──────────────► PLAN
-                      │
-                      │  tools: read, bash, grep, find, ls, write_plan
-                      │  system prompt: explore, ask questions, call write_plan
-                      │
-                      │  agent calls write_plan(markdown)
-                      │  ├─ extension writes .pi/plans/<name>.md
-                      │  ├─ extension shows plan to user
-                      │  └─ user approves ──────────────► EXECUTE
-                      │                                   │
-                      │                                   │  tools: everything
-                      │                                   │
-/plan ◄───────────────────────────────────────────────────┘
+                  /plan, Shift+Tab, or --plan
+                  ─────────────────────────────►
+        EXECUTE                                    PLAN
+                  ◄─────────────────────────────
+                  /plan or Shift+Tab
+
+PLAN ──/approve──► fresh child session in EXECUTE,
+                   seeded with the plan file as the
+                   first user message
 ```
 
-- `/plan` toggles between modes.
-- `Shift+Tab` shortcut toggles.
-- Approving a plan transitions to execute mode automatically.
-- Calling `/plan` during execute returns to plan mode (for replanning).
-
-## Tools
-
-### `write_plan`
-
-The only plan-specific tool. Agent calls it with a markdown plan.
-
-**Parameters:**
-- `name` — short slug for the plan (used as filename)
-- `content` — markdown plan
-
-**Behavior:**
-1. Writes `content` to `.pi/plans/<name>.md`
-2. Shows the plan to the user via `ctx.ui.select` with options: Approve / Edit / Refine
-3. If Edit: opens `ctx.ui.editor()` prefilled with the plan, writes edits back to file
-4. If Approve: transitions to execute mode, restores full tools, injects execution prompt
-5. If Refine: stays in plan mode
-
-The tool does not return to the LLM until the user has acted. The approval is part of the tool execution.
+The current mode is stored as a `plot-mode` custom session entry. `getMode` walks the session branch backwards and returns the most recent entry's mode, falling back to the `--plan` flag.
 
 ## Enforcement
 
-`setActiveTools` controls which tools exist. In plan mode, `edit` and `write` are not available — not filtered, not blocked, absent. The agent cannot write files. It can read, search, and call `write_plan`.
+Plan mode is enforced by a `tool_call` hook. When the agent calls `edit` or `write` with a path outside `.pi/plans/`, the hook returns `{ block: true, reason: ... }` and the call never runs. All other tools (`read`, `bash`, ...) are untouched — the agent explores normally.
 
-Bash is available in plan mode. `cat`, `rg`, `git log` are useful for exploration. The agent could technically write files via `bash` — this is acceptable. The point is to make the default path read-only, not to build a sandbox.
+This is a soft fence, not a sandbox. The agent could shell out via `bash` to write files; the goal is to make the default path read-only, not to prevent a determined agent from escaping.
 
-## Plan File
+## Plan tracking
 
-Location: `.pi/plans/<name>.md` (project-local, gitignorable).
+A `tool_result` hook watches successful `edit`/`write` calls. If the written path is under `.pi/plans/`, plot appends a `plot-plan` custom entry pointing at the absolute path. `getCurrentPlanPath` returns the most recent one.
 
-The file is the source of truth. It persists across compaction and session resume. On session start, if a plan file exists and we're in execute mode, the extension reads it back and shows a status widget.
+There is no dedicated `write_plan` tool — the agent uses ordinary `write`/`edit` and the location decides whether it counts as a plan.
 
-## System Prompt
+## Commands
 
-Injected via `before_agent_start` when in plan mode. Short:
+### `/plan`
 
-```
-You are in plan mode — read-only exploration before implementation.
+Toggles between plan and execute. Appends a `plot-mode` entry and sends a `customType: "plot"` system message (`triggerTurn: false`) announcing the change. Also bound to `Shift+Tab`.
 
-Explore the codebase to understand the task. Ask clarifying questions if needed.
-When ready, call write_plan with a concise, actionable plan.
+### `/approve`
 
-Do not attempt to edit or write files. Use write_plan when you have a plan.
-```
+Plan mode only. Reads the current plan file, then calls `ctx.newSession({ parentSession, withSession })` to start a fresh child session. Inside `withSession`:
+
+1. Appends a `plot-mode` entry setting mode to `execute`.
+2. Calls `applyMode` to update the status line.
+3. Calls `sendUserMessage` with the plan contents — the child session's first turn begins with the plan as the user message.
+
+If there's no current plan path, `/approve` notifies the user and aborts.
 
 ## Status
 
-- Plan mode: footer shows `plan` indicator
-- Execute mode with active plan: footer shows plan name
-- Widget: shows plan file contents (collapsed) during execute
+`applyMode` writes `Plan mode` or `Normal mode` to the status line via `ctx.ui.setStatus("plot", ...)`. If a plan file is tracked, the basename is appended in parentheses. The status is refreshed on `session_start` and whenever the mode changes.
+
+## Flag
+
+`--plan` (`pi.registerFlag("plan", ...)`) — start in plan mode. Only consulted by `getMode` as a fallback when no `plot-mode` entry exists in the session branch.
 
 ## Requirements
 

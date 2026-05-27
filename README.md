@@ -1,6 +1,6 @@
 # plot
 
-A [pi](https://github.com/earendil-works/pi) extension that adds plan mode — a read-only phase where the agent explores the codebase and writes a plan before gaining write access.
+A [pi](https://github.com/earendil-works/pi) extension that adds plan mode — a phase where the agent can only write files under `.pi/plans/`, so it explores and drafts a plan before getting full write access.
 
 ## Install
 
@@ -30,21 +30,18 @@ pi --plan
 
 Or use the shortcut: `Shift+Tab`
 
-Ask the agent to work on something. It will explore the codebase, ask clarifying questions if needed, and write a plan. You review the plan and choose:
+Ask the agent to work on something. It will explore the codebase and write a plan to `.pi/plans/<name>.md`. Review the plan, then:
 
-- **Approve** — agent gets full tool access and implements the plan
-- **Edit** — open the plan in your editor, make changes, then approve
-- **Refine** — stay in plan mode, give feedback, agent revises
-
-Toggle `/plan` again at any time to exit plan mode.
+- **`/approve`** — hands off to a fresh execute-mode session seeded with the plan as the first user message
+- **`/plan`** (or `Shift+Tab`) — toggle back out of plan mode without approval, e.g. to abandon or revise
 
 ## How it works
 
-In plan mode, only read-only tools are available (`read`, `bash`, `grep`, `find`, `ls`) plus `write_plan`. The agent cannot use `edit` or `write` — they are removed from the tool list, not just blocked.
+In plan mode, `edit` and `write` calls are blocked unless the path is under `.pi/plans/`. Every other tool (`read`, `bash`, etc.) works normally — the agent can explore freely, it just can't modify code yet.
 
-When the agent calls `write_plan`, the plan is saved to `.pi/plans/<name>.md` and you are prompted to review it. Approving transitions to execute mode where all tools are restored.
+When the agent successfully writes a file under `.pi/plans/`, plot remembers it as the current plan. Running `/approve` starts a fresh child session in execute mode and sends the plan contents as the opening user message, so the implementation session begins with a clean context.
 
-Plans persist on disk. They survive context compaction and session resume.
+Plans are plain markdown files on disk. They survive context compaction and session resume.
 
 ## Requirements
 
