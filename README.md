@@ -16,19 +16,7 @@ pi -e git:github.com/resolveworks/plot
 
 ## Usage
 
-Enter plan mode:
-
-```
-/plan
-```
-
-Or start with the flag:
-
-```bash
-pi --plan
-```
-
-Or use the shortcut: `Shift+Tab`
+Enter plan mode with `/plan` or `Shift+Tab`.
 
 Ask the agent to work on something. It will explore the codebase and write a plan to `.pi/plans/<name>.md`. Review the plan, then:
 
