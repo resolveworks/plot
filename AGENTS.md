@@ -7,7 +7,7 @@
 Two modes. Transitions are explicit.
 
 ```
-                  /plan, Shift+Tab, or --plan
+                  /plan or Shift+Tab
                   ─────────────────────────────►
         EXECUTE                                    PLAN
                   ◄─────────────────────────────
@@ -18,7 +18,7 @@ PLAN ──/approve──► fresh child session in EXECUTE,
                    first user message
 ```
 
-The current mode is stored as a `plot-mode` custom session entry. `getMode` walks the session branch backwards and returns the most recent entry's mode, falling back to the `--plan` flag.
+The current mode is stored as a `plot-mode` custom session entry. `getMode` walks the session branch backwards and returns the most recent entry's mode, defaulting to `execute` when no entry exists. Sessions always start in execute mode; the user opts into plan mode explicitly.
 
 ## Enforcement
 
@@ -40,17 +40,11 @@ Toggles between plan and execute. Appends a `plot-mode` entry and sends a `custo
 
 ### `/approve`
 
-Plan mode only. Reads the current plan file, then calls `ctx.newSession({ parentSession, withSession })` to start a fresh child session. Inside `withSession`:
+Plan mode only. Reads the current plan file, then calls `ctx.newSession({ parentSession, withSession })` to start a fresh child session. `withSession` only calls `sendUserMessage(planContent)` — the child session has no `plot-mode` entries, so `getMode` returns `execute` by default, and `session_start` re-runs `applyMode` from a fresh extension load.
 
-1. Appends a `plot-mode` entry setting mode to `execute`.
-2. Calls `applyMode` to update the status line.
-3. Calls `sendUserMessage` with the plan contents — the child session's first turn begins with the plan as the user message.
+The `withSession` callback must not call methods on the outer `pi` (e.g. `pi.appendEntry`) — that `pi` is bound to the parent `AgentSession`, which pi disposes before invoking the callback. Use `replacementCtx` for anything that needs to target the child session.
 
 If there's no current plan path, `/approve` notifies the user and aborts.
-
-## Flag
-
-`--plan` (`pi.registerFlag("plan", ...)`) — start in plan mode. Only consulted by `getMode` as a fallback when no `plot-mode` entry exists in the session branch.
 
 ## Requirements
 

@@ -10,23 +10,22 @@ function isInsidePlans(absolutePath: string, plansDir: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
+function findLatest<T>(ctx: ExtensionContext, customType: string): T | undefined {
+  for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
+    if (entry.type === "custom" && (entry as { customType?: string }).customType === customType) {
+      return (entry as { data?: T }).data;
+    }
+  }
+  return undefined;
+}
+
 export default function plot(pi: ExtensionAPI) {
   function getMode(ctx: ExtensionContext): Mode {
-    for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
-      if (entry.type === "custom" && (entry as { customType?: string }).customType === "plot-mode") {
-        return (entry as { data?: { mode?: Mode } }).data?.mode ?? "execute";
-      }
-    }
-    return pi.getFlag("plan") === true ? "plan" : "execute";
+    return findLatest<{ mode?: Mode }>(ctx, "plot-mode")?.mode ?? "execute";
   }
 
   function getCurrentPlanPath(ctx: ExtensionContext): string | undefined {
-    for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
-      if (entry.type === "custom" && (entry as { customType?: string }).customType === "plot-plan") {
-        return (entry as { data?: { path?: string } }).data?.path;
-      }
-    }
-    return undefined;
+    return findLatest<{ path?: string }>(ctx, "plot-plan")?.path;
   }
 
   function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
@@ -35,41 +34,23 @@ export default function plot(pi: ExtensionAPI) {
     ctx.ui.setWidget("plot", [ctx.ui.theme.fg("accent", text)]);
   }
 
-  function setMode(mode: Mode, ctx: ExtensionContext) {
+  function togglePlanMode(ctx: ExtensionContext) {
+    const mode = getMode(ctx) === "plan" ? "execute" : "plan";
     pi.appendEntry("plot-mode", { mode });
     applyMode(mode, getCurrentPlanPath(ctx), ctx);
 
-    if (mode === "plan") {
-      pi.sendMessage(
-        {
-          customType: "plot",
-          content:
-            "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, run /approve.",
-          display: false,
-        },
-        { triggerTurn: false },
-      );
-    } else {
-      pi.sendMessage(
-        {
-          customType: "plot",
-          content: "[Plan mode ended] Full file access restored.",
-          display: false,
-        },
-        { triggerTurn: false },
-      );
-    }
+    pi.sendMessage(
+      {
+        customType: "plot",
+        content:
+          mode === "plan"
+            ? "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, run /approve."
+            : "[Plan mode ended] Full file access restored.",
+        display: false,
+      },
+      { triggerTurn: false },
+    );
   }
-
-  function togglePlanMode(ctx: ExtensionContext) {
-    setMode(getMode(ctx) === "plan" ? "execute" : "plan", ctx);
-  }
-
-  pi.registerFlag("plan", {
-    description: "Start in plan mode (read-only exploration)",
-    type: "boolean",
-    default: false,
-  });
 
   pi.registerCommand("plan", {
     description: "Toggle plan mode",
@@ -96,9 +77,7 @@ export default function plot(pi: ExtensionAPI) {
       await ctx.newSession({
         parentSession: parentSession ?? undefined,
         withSession: async (replacementCtx) => {
-          pi.appendEntry("plot-mode", { mode: "execute" });
-          applyMode("execute", planPath, replacementCtx);
-          replacementCtx.sendUserMessage(planContent);
+          await replacementCtx.sendUserMessage(planContent);
         },
       });
     },
