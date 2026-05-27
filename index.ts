@@ -140,6 +140,7 @@ export default function plot(pi: ExtensionAPI) {
     if (!isInsidePlans(absolutePath, plansDir)) return;
 
     pi.appendEntry("plot-plan", { path: absolutePath });
+    applyMode(getMode(ctx), absolutePath, ctx);
   });
 
   pi.on("session_start", async (_event, ctx) => {
