@@ -80,7 +80,7 @@ export default function plot(pi: ExtensionAPI) {
       await ctx.newSession({
         parentSession: parentSession ?? undefined,
         withSession: async (replacementCtx) => {
-          await replacementCtx.sendUserMessage(planContent);
+          await replacementCtx.sendUserMessage(`implement this plan:\n\n${planContent}`);
         },
       });
     },
@@ -115,6 +115,10 @@ export default function plot(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
   });
 }
