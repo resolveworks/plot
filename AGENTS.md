@@ -48,10 +48,6 @@ Plan mode only. Reads the current plan file, then calls `ctx.newSession({ parent
 
 If there's no current plan path, `/approve` notifies the user and aborts.
 
-## Status
-
-`applyMode` writes `Plan mode` or `Normal mode` to the status line via `ctx.ui.setStatus("plot", ...)`. If a plan file is tracked, the basename is appended in parentheses. The status is refreshed on `session_start` and whenever the mode changes.
-
 ## Flag
 
 `--plan` (`pi.registerFlag("plan", ...)`) — start in plan mode. Only consulted by `getMode` as a fallback when no `plot-mode` entry exists in the session branch.

@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 type Mode = "plan" | "execute";
 
@@ -31,8 +31,8 @@ export default function plot(pi: ExtensionAPI) {
 
   function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
     const label = mode === "plan" ? "Plan mode" : "Normal mode";
-    const text = planPath ? `${label} (${basename(planPath, ".md")})` : label;
-    ctx.ui.setStatus("plot", ctx.ui.theme.fg("accent", text));
+    const text = planPath ? `${label} (${relative(ctx.cwd, planPath)})` : label;
+    ctx.ui.setWidget("plot", [ctx.ui.theme.fg("accent", text)]);
   }
 
   function setMode(mode: Mode, ctx: ExtensionContext) {
