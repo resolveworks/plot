@@ -1,22 +1,25 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
 type Mode = "plan" | "execute";
 
-function isInsidePlans(absolutePath: string, plansDir: string): boolean {
-  const rel = relative(plansDir, absolutePath);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
-}
-
 function findLatest<T>(ctx: ExtensionContext, customType: string): T | undefined {
-  for (const entry of [...ctx.sessionManager.getBranch()].reverse()) {
-    if (entry.type === "custom" && (entry as { customType?: string }).customType === customType) {
-      return (entry as { data?: T }).data;
+  const branch = ctx.sessionManager.getBranch();
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const entry = branch[i];
+    if (entry.type === "custom" && entry.customType === customType) {
+      return (entry as CustomEntry<T>).data;
     }
   }
   return undefined;
+}
+
+function planPathFromToolInput(input: unknown, ctx: ExtensionContext): string | undefined {
+  const absolutePath = resolve(ctx.cwd, (input as { path: string }).path);
+  const plansDir = resolve(ctx.cwd, ".pi/plans");
+  return absolutePath.startsWith(plansDir + sep) ? absolutePath : undefined;
 }
 
 export default function plot(pi: ExtensionAPI) {
@@ -91,32 +94,21 @@ export default function plot(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (getMode(ctx) !== "plan") return;
     if (event.toolName !== "edit" && event.toolName !== "write") return;
+    if (planPathFromToolInput(event.input, ctx)) return;
 
-    const rawPath = (event.input as { path?: unknown }).path;
-    if (typeof rawPath !== "string") return;
-
-    const plansDir = resolve(ctx.cwd, ".pi/plans");
-    const absolutePath = resolve(ctx.cwd, rawPath);
-
-    if (!isInsidePlans(absolutePath, plansDir)) {
-      return {
-        block: true,
-        reason:
-          "Plan mode: only files under .pi/plans/ can be edited or written. Use read and bash to explore code, then write your plan to .pi/plans/<name>.md, then run /approve.",
-      };
-    }
+    return {
+      block: true,
+      reason:
+        "Plan mode: only files under .pi/plans/ can be edited or written. Use read and bash to explore code, then write your plan to .pi/plans/<name>.md, then run /approve.",
+    };
   });
 
   pi.on("tool_result", async (event, ctx) => {
     if (event.isError) return;
     if (event.toolName !== "edit" && event.toolName !== "write") return;
 
-    const rawPath = (event.input as { path?: unknown }).path;
-    if (typeof rawPath !== "string") return;
-
-    const plansDir = resolve(ctx.cwd, ".pi/plans");
-    const absolutePath = resolve(ctx.cwd, rawPath);
-    if (!isInsidePlans(absolutePath, plansDir)) return;
+    const absolutePath = planPathFromToolInput(event.input, ctx);
+    if (!absolutePath) return;
 
     pi.appendEntry("plot-plan", { path: absolutePath });
     applyMode(getMode(ctx), absolutePath, ctx);
