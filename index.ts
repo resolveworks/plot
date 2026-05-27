@@ -40,16 +40,20 @@ export default function plot(pi: ExtensionAPI) {
     }
   }
 
-  function togglePlanMode(ctx: ExtensionContext) {
-    planMode = !planMode;
+  function setPlanMode(enabled: boolean, ctx: ExtensionContext) {
+    planMode = enabled;
     if (planMode) {
       pi.setActiveTools(PLAN_TOOLS);
       ctx.ui.notify("Plan mode — read-only exploration");
     } else {
-      pi.setActiveTools(pi.getAllTools().map((t) => t.name));
+      pi.setActiveTools(pi.getAllTools().map((t) => t.name).filter((n) => n !== "write_plan"));
       ctx.ui.notify("Execute mode — full access restored");
     }
     updateStatus(ctx);
+  }
+
+  function togglePlanMode(ctx: ExtensionContext) {
+    setPlanMode(!planMode, ctx);
   }
 
   pi.registerCommand("plan", {
@@ -109,10 +113,8 @@ export default function plot(pi: ExtensionAPI) {
       }
 
       // Transition to execute mode
-      planMode = false;
       activePlan = params.name;
-      pi.setActiveTools(pi.getAllTools().map((t) => t.name));
-      updateStatus(ctx);
+      setPlanMode(false, ctx);
       setWidget(ctx);
 
       return {
@@ -130,7 +132,7 @@ export default function plot(pi: ExtensionAPI) {
     }
   });
 
-  function reconstructPlan(ctx: ExtensionContext) {
+  function restorePlanState(ctx: ExtensionContext) {
     const entries = ctx.sessionManager.getEntries();
     const planEntry = [...entries]
       .reverse()
@@ -143,10 +145,7 @@ export default function plot(pi: ExtensionAPI) {
       activePlan = planEntry.data.activePlan;
     }
 
-    if (planMode) {
-      pi.setActiveTools(PLAN_TOOLS);
-    }
-    updateStatus(ctx);
+    setPlanMode(planMode, ctx);
     if (activePlan) setWidget(ctx);
   }
 
@@ -157,6 +156,6 @@ export default function plot(pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     planMode = false;
     activePlan = undefined;
-    reconstructPlan(ctx);
+    restorePlanState(ctx);
   });
 }
