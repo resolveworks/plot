@@ -38,7 +38,16 @@ export default function plot(pi: ExtensionAPI) {
     ctx.ui.setWidget("plot", [ctx.ui.theme.fg("accent", text)]);
   }
 
-  function togglePlanMode(ctx: ExtensionContext) {
+  async function buildPlanMessage(ctx: ExtensionContext): Promise<string> {
+    const base =
+      "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, run /approve.";
+    const planPath = getCurrentPlanPath(ctx);
+    if (!planPath) return base;
+    const content = await readFile(planPath, "utf8");
+    return `${base}\n\nYou are working on plan: ${relative(ctx.cwd, planPath)}\n\n${content}`;
+  }
+
+  async function togglePlanMode(ctx: ExtensionContext) {
     const mode = getMode(ctx) === "plan" ? "execute" : "plan";
     pi.appendEntry("plot-mode", { mode });
     applyMode(mode, getCurrentPlanPath(ctx), ctx);
@@ -48,7 +57,7 @@ export default function plot(pi: ExtensionAPI) {
         customType: "plot",
         content:
           mode === "plan"
-            ? "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, run /approve."
+            ? await buildPlanMessage(ctx)
             : "[Plan mode ended] Full file access restored.",
         display: false,
       },
@@ -151,6 +160,18 @@ export default function plot(pi: ExtensionAPI) {
     }
 
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
+
+    // Inform the model about plan mode and current plan
+    if (getMode(ctx) === "plan") {
+      pi.sendMessage(
+        {
+          customType: "plot",
+          content: await buildPlanMessage(ctx),
+          display: false,
+        },
+        { triggerTurn: false },
+      );
+    }
   });
 
   pi.on("session_tree", async (_event, ctx) => {
