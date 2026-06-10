@@ -1,4 +1,5 @@
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
@@ -114,7 +115,41 @@ export default function plot(pi: ExtensionAPI) {
     applyMode(getMode(ctx), absolutePath, ctx);
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
+    // Carry over plan state from previous session on /new
+    if (event.reason === "new" && event.previousSessionFile) {
+      try {
+        const prevSession = await SessionManager.open(event.previousSessionFile);
+        const branch = prevSession.getBranch();
+
+        let inheritedMode: Mode | undefined;
+        let inheritedPlanPath: string | undefined;
+
+        for (let i = branch.length - 1; i >= 0; i--) {
+          const entry = branch[i];
+          if (entry.type === "custom") {
+            const ce = entry as CustomEntry;
+            if (!inheritedMode && ce.customType === "plot-mode") {
+              inheritedMode = (ce.data as { mode?: Mode })?.mode;
+            }
+            if (!inheritedPlanPath && ce.customType === "plot-plan") {
+              inheritedPlanPath = (ce.data as { path?: string })?.path;
+            }
+            if (inheritedMode && inheritedPlanPath) break;
+          }
+        }
+
+        if (inheritedMode) {
+          pi.appendEntry("plot-mode", { mode: inheritedMode });
+        }
+        if (inheritedPlanPath) {
+          pi.appendEntry("plot-plan", { path: inheritedPlanPath });
+        }
+      } catch {
+        // Previous session unreadable — start fresh, no-op
+      }
+    }
+
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
   });
 
