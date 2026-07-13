@@ -54,16 +54,18 @@ There is no dedicated `write_plan` tool — the agent uses ordinary `edit`/`writ
 
 ## Model context
 
-Plan guidance is delivered dynamically per turn, never persisted into LLM context.
+Plan guidance is delivered transiently per provider request and is never persisted into session history. It is injected by a `context` hook (not `before_agent_start`), so plot no longer changes the system prompt or active built-in tool definitions across execute/plan mode. Prefix caching can therefore reuse the stable system/tools/history up to the dynamic tail.
 
-- **execute mode:** adds no plot system text at all.
-- **plan mode:** `before_agent_start` appends a concise, strong instruction to the system prompt for that turn only — it is investigation/planning, not implementation; `edit`/`write` are restricted to the canonical plan directory and the model is given the exact absolute directory to pass to those tools; read-only exploration tools may all be used; the plan must be a self-contained handoff (goal/constraints, findings, exact files/symbols, ordered changes, validation/tests, risks/open questions); and when ready the model should save the plan and tell the **user** to run `/approve` (the model cannot invoke `/approve` itself). The plan directory is defensively ensured this turn. If a current plan exists under the canonical directory, its path and content are included so it can be revised; an unreadable current plan is reported in the guidance rather than aborting the turn. If there is no session directory, the guidance reports a clear error instead of plan instructions.
+- **execute mode:** the `context` hook adds nothing.
+- **plan mode:** the `context` hook appends exactly one request-local trailing guidance message — a hidden `role: "custom"` message with `customType: "plot-plan-guidance"` — to the deep-copied `event.messages` and returns it. Pi converts that custom message to a provider-visible user message after the context transform. The mutation is transient: `event.messages` is a deep copy used only for that single provider request, so nothing is written to session state and no filtering of stale guidance is ever needed. The guidance is investigation/planning, not implementation; `edit`/`write` are restricted to the canonical plan directory and the model is given the exact absolute directory to pass to those tools; read-only exploration tools may all be used; the plan must be a self-contained handoff (goal/constraints, findings, exact files/symbols, ordered changes, validation/tests, risks/open questions); and when ready the model should save the plan and tell the **user** to run `/approve` (the model cannot invoke `/approve` itself). The plan directory is defensively recreated/checked on this call. The authoritative current plan is re-read and included on every call (path and content) so it can be revised; an unreadable current plan is reported in the guidance rather than aborting the call. If there is no session directory, the guidance reports a clear error instead of plan instructions.
+
+The hook runs before every provider request, including tool-loop continuations. This repetition is intentional: providers are stateless and the context mutation is transient, so appending at the tail limits cache divergence to the latest dynamic region (the new/changed guidance) instead of changing the early system-prompt prefix on every mode change or plan revision.
 
 ## Commands
 
 ### `/plan`
 
-Toggles between plan and execute. When toggling into plan mode it first ensures the canonical plan directory can be created; if there is no session directory or `mkdir` fails, it notifies the user and does **not** append a plan-mode entry. Otherwise it appends a `plot-mode` entry and updates the widget — nothing else. Toggling does **not** inject a message into LLM context and does **not** trigger a model turn; plan-mode guidance is delivered dynamically per turn (see [Model context](#model-context)). Also bound to `Shift+Tab`.
+Toggles between plan and execute. When toggling into plan mode it first ensures the canonical plan directory can be created; if there is no session directory or `mkdir` fails, it notifies the user and does **not** append a plan-mode entry. Otherwise it appends a `plot-mode` entry and updates the widget — nothing else. Toggling does **not** inject a message into LLM context and does **not** trigger a model turn; plan-mode guidance is delivered transiently per provider request via the `context` hook (see [Model context](#model-context)). Also bound to `Shift+Tab`.
 
 ### `/approve`
 

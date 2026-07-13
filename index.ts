@@ -148,6 +148,36 @@ export default function plot(pi: ExtensionAPI) {
     return isUnderDirectory(path, planDir) ? path : undefined;
   }
 
+  /**
+   * Build the trailing plan-mode guidance string for a single provider request.
+   *
+   * Defensively recreates/checks the plan directory each call and re-reads the
+   * authoritative current plan, so resume, compaction, /tree, fork/clone,
+   * external file changes, and tool-loop plan revisions all stay correct. Used
+   * only to construct the transient context-hook message; it never touches
+   * session state.
+   */
+  async function buildPlanGuidance(ctx: ExtensionContext): Promise<string> {
+    const result = await ensurePlanDir(ctx);
+    if (!result.ok) {
+      return `# Plan mode unavailable\n\n${result.reason}\n\nPlan mode cannot proceed this turn. Ask the user to leave plan mode (/plan or Shift+Tab) or restart pi in a normal persisted session.`;
+    }
+
+    const instructions = buildPlanInstructions(result.planDir);
+    const planPath = getCurrentPlanPath(ctx);
+    if (!planPath) {
+      return instructions;
+    }
+
+    const display = abbreviateHome(planPath);
+    try {
+      const content = await readFile(planPath, "utf8");
+      return `${instructions}\n\nCurrent plan (${display}) — revise it in place or extend it:\n\n${content}`;
+    } catch (error) {
+      return `${instructions}\n\nThe current plan (${display}) could not be read: ${errorMessage(error)}. Save a new plan before asking the user to approve it.`;
+    }
+  }
+
   function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
     const label = mode === "plan" ? "Plan mode" : "Execute mode";
     const text = planPath ? `${label} (${abbreviateHome(planPath)})` : label;
@@ -245,36 +275,31 @@ export default function plot(pi: ExtensionAPI) {
     applyMode(getMode(ctx), absolutePath, ctx);
   });
 
-  // Inject dynamic plan-mode guidance per turn. Execute mode adds nothing.
-  pi.on("before_agent_start", async (event, ctx) => {
+  // Inject dynamic plan-mode guidance as a transient trailing message before
+  // each provider request (including tool-loop continuations). Execute mode adds
+  // nothing. The guidance is appended to the deep-copied event.messages, which
+  // Pi uses only for this request and never persists to session state, so the
+  // system prompt and active tool definitions stay byte-stable across
+  // execute/plan mode and prefix caching can reuse everything up to this tail.
+  // Pi converts the custom message to a provider-visible user message after the
+  // context transform. This repetition per provider call is intentional:
+  // providers are stateless and the mutation is transient, so appending at the
+  // tail limits cache divergence to the latest dynamic region.
+  pi.on("context", async (event, ctx) => {
     if (getMode(ctx) !== "plan") return;
-
-    // Defensively recreate the plan directory for this turn in case it was
-    // removed since plan mode was entered.
-    const result = await ensurePlanDir(ctx);
-    if (!result.ok) {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n# Plan mode unavailable\n\n${result.reason}\n\nPlan mode cannot proceed this turn. Ask the user to leave plan mode (/plan or Shift+Tab) or restart pi in a normal persisted session.`,
-      };
-    }
-
-    const instructions = buildPlanInstructions(result.planDir);
-    const planPath = getCurrentPlanPath(ctx);
-    if (!planPath) {
-      return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
-    }
-
-    const display = abbreviateHome(planPath);
-    try {
-      const content = await readFile(planPath, "utf8");
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n${instructions}\n\nCurrent plan (${display}) — revise it in place or extend it:\n\n${content}`,
-      };
-    } catch (error) {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n${instructions}\n\nThe current plan (${display}) could not be read: ${errorMessage(error)}. Save a new plan before asking the user to approve it.`,
-      };
-    }
+    const guidance = await buildPlanGuidance(ctx);
+    return {
+      messages: [
+        ...event.messages,
+        {
+          role: "custom",
+          customType: "plot-plan-guidance",
+          content: guidance,
+          display: false,
+          timestamp: Date.now(),
+        },
+      ],
+    };
   });
 
   pi.on("session_start", async (_event, ctx) => {
