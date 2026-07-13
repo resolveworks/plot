@@ -1,9 +1,13 @@
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { readFile } from "node:fs/promises";
-import { relative, resolve, sep } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 
 type Mode = "plan" | "execute";
+
+/** Subdirectory plot creates inside the project's session storage directory. */
+const PLAN_SUBDIR = "plot-plans";
 
 function findLatest<T>(ctx: ExtensionContext, customType: string): T | undefined {
   const branch = ctx.sessionManager.getBranch();
@@ -16,22 +20,106 @@ function findLatest<T>(ctx: ExtensionContext, customType: string): T | undefined
   return undefined;
 }
 
-function planPathFromToolInput(input: unknown, ctx: ExtensionContext): string | undefined {
-  const absolutePath = resolve(ctx.cwd, (input as { path: string }).path);
-  const plansDir = resolve(ctx.cwd, ".pi/plans");
-  return absolutePath.startsWith(plansDir + sep) ? absolutePath : undefined;
+/**
+ * The single canonical plan directory, shared across every session in the
+ * project:
+ *
+ *   <ctx.sessionManager.getSessionDir()>/plot-plans/
+ *
+ * `getSessionDir()` is pi's cwd-specific project session storage (default:
+ * ~/.pi/agent/sessions/<encoded-cwd>/). Returns undefined when there is no
+ * persisted session (e.g. --no-session / in-memory mode), in which case plan
+ * mode is unavailable.
+ */
+function getPlanDir(ctx: ExtensionContext): string | undefined {
+  const sessionDir = ctx.sessionManager.getSessionDir();
+  if (!sessionDir) return undefined;
+  return resolve(sessionDir, PLAN_SUBDIR);
 }
 
-const PLAN_INSTRUCTIONS = `# Plan mode active
+/**
+ * Separator-aware containment: true iff `target` resolves to `dir` itself or a
+ * path nested below it. Appending the platform separator rejects similarly
+ * prefixed siblings (e.g. /a/b vs /a/baz). Empty input never matches.
+ */
+function isUnderDirectory(target: string, dir: string): boolean {
+  if (!target || !dir) return false;
+  const t = resolve(target);
+  const d = resolve(dir);
+  return t === d || t.startsWith(d + sep);
+}
+
+/** Abbreviate the user's home directory as ~ for display only. */
+function abbreviateHome(p: string): string {
+  const home = homedir();
+  if (home && (p === home || p.startsWith(home + sep))) {
+    return "~" + p.slice(home.length);
+  }
+  return p;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Extract the `path` argument from an edit/write tool input. */
+function toolInputPath(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const obj = input as { path?: unknown };
+  const raw = obj.path;
+  return typeof raw === "string" && raw.trim().length > 0 ? raw : undefined;
+}
+
+/**
+ * Resolve an edit/write input path against cwd, then test whether it lands
+ * inside the canonical plan directory. The model is always given the absolute
+ * plan directory so it passes that path verbatim, keeping plot's resolution
+ * consistent with the built-in tools' own path handling. Returns the resolved
+ * absolute path when it is a valid plan write, otherwise undefined.
+ */
+function resolvePlanWrite(input: unknown, ctx: ExtensionContext): string | undefined {
+  const planDir = getPlanDir(ctx);
+  if (!planDir) return undefined;
+  const raw = toolInputPath(input);
+  if (!raw) return undefined;
+  const absolutePath = resolve(ctx.cwd, raw);
+  return isUnderDirectory(absolutePath, planDir) ? absolutePath : undefined;
+}
+
+/** Create the canonical plan directory if needed; it is the only location plot uses for plans. */
+async function ensurePlanDir(
+  ctx: ExtensionContext,
+): Promise<{ ok: true; planDir: string } | { ok: false; reason: string }> {
+  const planDir = getPlanDir(ctx);
+  if (!planDir) {
+    return {
+      ok: false,
+      reason:
+        "Plan mode requires a persisted session to store plans, but this session has no session directory (e.g. it is running with --no-session). Start a normal pi session so plans can be saved, then try again.",
+    };
+  }
+  try {
+    await mkdir(planDir, { recursive: true });
+    return { ok: true, planDir };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `Could not create the plan directory (${abbreviateHome(planDir)}): ${errorMessage(error)}`,
+    };
+  }
+}
+
+function buildPlanInstructions(planDir: string): string {
+  return `# Plan mode active
 
 You are in PLAN mode: investigate and plan, do not implement. Produce a plan that a separate, fresh implementation agent can execute from a cold start.
 
 Rules
-- edit/write are restricted: you may only write files under .pi/plans/. Edits anywhere else are blocked.
+- edit/write are restricted: you may ONLY write files under ${planDir}. Edits and writes anywhere else are blocked. Use the absolute path shown here.
 - All read-only exploration tools are available (read, bash, grep, find, ls, and any others) — use whichever helps you investigate, not just read and bash.
 - Do not implement the change or modify source files now.
 
-The plan you write to .pi/plans/<name>.md must be a self-contained handoff. Include:
+The plan you write to ${planDir}/<name>.md must be a self-contained handoff. The plan directory is shared across sessions in this project, so pick a distinctive, task-specific Markdown filename. Include:
 - Goal and constraints (what "done" looks like).
 - Key findings from exploration (architecture, relevant behavior, gotchas).
 - Exact files and symbols to change, with paths.
@@ -39,42 +127,45 @@ The plan you write to .pi/plans/<name>.md must be a self-contained handoff. Incl
 - How to validate (tests to run or add, type-checks, build steps).
 - Risks, assumptions, and open questions for the reviewer.
 
-When the plan is ready: SAVE it under .pi/plans/, then tell the USER to review it and run /approve. You cannot run /approve yourself — only the user can approve and start the implementation session.`;
+When the plan is ready: SAVE it under ${planDir}/, then tell the USER to review it and run /approve. You cannot run /approve yourself — only the user can approve and start the implementation session.`;
+}
 
 export default function plot(pi: ExtensionAPI) {
   function getMode(ctx: ExtensionContext): Mode {
     return findLatest<{ mode?: Mode }>(ctx, "plot-mode")?.mode ?? "execute";
   }
 
+  // The "current plan" is the most recent `plot-plan` pointer in this session's
+  // branch, kept only if it resolves inside the project's shared plan directory.
+  // The directory itself is shared across every session in the project, so a
+  // pointer copied into a branch by fork/clone stays valid; the branch (not the
+  // filesystem) decides ownership.
   function getCurrentPlanPath(ctx: ExtensionContext): string | undefined {
-    return findLatest<{ path?: string }>(ctx, "plot-plan")?.path;
+    const planDir = getPlanDir(ctx);
+    if (!planDir) return undefined;
+    const path = findLatest<{ path?: string }>(ctx, "plot-plan")?.path;
+    if (!path) return undefined;
+    return isUnderDirectory(path, planDir) ? path : undefined;
   }
 
   function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
     const label = mode === "plan" ? "Plan mode" : "Execute mode";
-    const text = planPath ? `${label} (${relative(ctx.cwd, planPath)})` : label;
+    const text = planPath ? `${label} (${abbreviateHome(planPath)})` : label;
     ctx.ui.setWidget("plot", [ctx.ui.theme.fg("accent", text)]);
   }
 
-  // Dynamic, per-turn plan-mode context appended to the system prompt.
-  async function buildPlanSystemContext(ctx: ExtensionContext): Promise<string> {
-    const planPath = getCurrentPlanPath(ctx);
-    if (!planPath) return PLAN_INSTRUCTIONS;
-
-    const rel = relative(ctx.cwd, planPath);
-    try {
-      const content = await readFile(planPath, "utf8");
-      return `${PLAN_INSTRUCTIONS}\n\nCurrent plan (${rel}) — revise it in place or extend it:\n\n${content}`;
-    } catch (error) {
-      return `${PLAN_INSTRUCTIONS}\n\nThe tracked plan (${rel}) could not be read: ${errorMessage(error)}. Save a new plan before asking the user to approve it.`;
-    }
-  }
-
   // Persisted state + UI only. No model turn is triggered by toggling.
-  function togglePlanMode(ctx: ExtensionContext) {
-    const mode = getMode(ctx) === "plan" ? "execute" : "plan";
-    pi.appendEntry("plot-mode", { mode });
-    applyMode(mode, getCurrentPlanPath(ctx), ctx);
+  async function togglePlanMode(ctx: ExtensionContext) {
+    const next: Mode = getMode(ctx) === "plan" ? "execute" : "plan";
+    if (next === "plan") {
+      const result = await ensurePlanDir(ctx);
+      if (!result.ok) {
+        ctx.ui.notify(`Could not enter plan mode: ${result.reason}`, "error");
+        return; // do not append a plan-mode entry
+      }
+    }
+    pi.appendEntry("plot-mode", { mode: next });
+    applyMode(next, getCurrentPlanPath(ctx), ctx);
   }
 
   pi.registerCommand("plan", {
@@ -92,7 +183,9 @@ export default function plot(pi: ExtensionAPI) {
 
       const planPath = getCurrentPlanPath(ctx);
       if (!planPath) {
-        ctx.ui.notify("No plan file has been written yet. Write one under .pi/plans/ first.", "error");
+        const planDir = getPlanDir(ctx);
+        const where = planDir ? ` under ${abbreviateHome(planDir)}` : "";
+        ctx.ui.notify(`No current plan has been written yet. Write one${where} first.`, "error");
         return;
       }
 
@@ -100,7 +193,10 @@ export default function plot(pi: ExtensionAPI) {
       try {
         planContent = await readFile(planPath, "utf8");
       } catch (error) {
-        ctx.ui.notify(`Could not read the current plan: ${errorMessage(error)}`, "error");
+        ctx.ui.notify(
+          `Could not read the current plan (${abbreviateHome(planPath)}): ${errorMessage(error)}`,
+          "error",
+        );
         return;
       }
 
@@ -125,12 +221,16 @@ export default function plot(pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (getMode(ctx) !== "plan") return;
     if (event.toolName !== "edit" && event.toolName !== "write") return;
-    if (planPathFromToolInput(event.input, ctx)) return;
 
+    if (resolvePlanWrite(event.input, ctx)) return;
+
+    const planDir = getPlanDir(ctx);
+    const where = planDir
+      ? `under ${planDir}`
+      : "under the project's plan directory, but this session has no session directory (e.g. --no-session)";
     return {
       block: true,
-      reason:
-        "Plan mode: only files under .pi/plans/ can be edited or written. Use read-only tools (read, bash, grep, find, etc.) to explore code, then write your plan to .pi/plans/<name>.md, then ask the user to run /approve.",
+      reason: `Plan mode: only files ${where} can be edited or written. Use read-only tools (read, bash, grep, find, etc.) to explore code, then write your plan to the plan directory, then ask the user to run /approve.`,
     };
   });
 
@@ -138,45 +238,56 @@ export default function plot(pi: ExtensionAPI) {
     if (event.isError) return;
     if (event.toolName !== "edit" && event.toolName !== "write") return;
 
-    const absolutePath = planPathFromToolInput(event.input, ctx);
+    const absolutePath = resolvePlanWrite(event.input, ctx);
     if (!absolutePath) return;
 
     pi.appendEntry("plot-plan", { path: absolutePath });
     applyMode(getMode(ctx), absolutePath, ctx);
   });
 
-  // Hide announcements persisted by older plot versions. Current mode guidance
-  // comes exclusively from before_agent_start below.
-  pi.on("context", async (event) => ({
-    messages: event.messages.filter(
-      (message) => message.role !== "custom" || message.customType !== "plot",
-    ),
-  }));
-
   // Inject dynamic plan-mode guidance per turn. Execute mode adds nothing.
   pi.on("before_agent_start", async (event, ctx) => {
     if (getMode(ctx) !== "plan") return;
-    const planContext = await buildPlanSystemContext(ctx);
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${planContext}`,
-    };
+
+    // Defensively recreate the plan directory for this turn in case it was
+    // removed since plan mode was entered.
+    const result = await ensurePlanDir(ctx);
+    if (!result.ok) {
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n# Plan mode unavailable\n\n${result.reason}\n\nPlan mode cannot proceed this turn. Ask the user to leave plan mode (/plan or Shift+Tab) or restart pi in a normal persisted session.`,
+      };
+    }
+
+    const instructions = buildPlanInstructions(result.planDir);
+    const planPath = getCurrentPlanPath(ctx);
+    if (!planPath) {
+      return { systemPrompt: `${event.systemPrompt}\n\n${instructions}` };
+    }
+
+    const display = abbreviateHome(planPath);
+    try {
+      const content = await readFile(planPath, "utf8");
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n${instructions}\n\nCurrent plan (${display}) — revise it in place or extend it:\n\n${content}`,
+      };
+    } catch (error) {
+      return {
+        systemPrompt: `${event.systemPrompt}\n\n${instructions}\n\nThe current plan (${display}) could not be read: ${errorMessage(error)}. Save a new plan before asking the user to approve it.`,
+      };
+    }
   });
 
   pi.on("session_start", async (_event, ctx) => {
     // Fresh sessions (/new, /approve child) start in execute mode by default:
     // they have no plot-mode entries, so getMode returns "execute". Resume/fork
-    // restore whatever state already exists in that session. We do NOT copy state
-    // from previousSessionFile.
+    // restore whatever state already exists in that session. We do NOT copy
+    // state from previousSessionFile.
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
   });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function buildKickoffMessage(planContent: string): string {
