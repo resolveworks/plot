@@ -18,7 +18,9 @@ PLAN ──/approve──► fresh child session in EXECUTE,
                    first user message
 ```
 
-The current mode is stored as a `plot-mode` custom session entry. `getMode` walks the session branch backwards and returns the most recent entry's mode, defaulting to `execute` when no entry exists. Sessions always start in execute mode; the user opts into plan mode explicitly.
+The current mode is stored as a `plot-mode` custom session entry. `getMode` walks the session branch backwards and returns the most recent entry's mode, defaulting to `execute` when no entry exists.
+
+Genuinely fresh sessions start in execute mode — `/new` and the child session created by `/approve` have no `plot-mode` entries, so `getMode` returns `execute`. Plot never copies plan state out of a previous session on `session_start`. `/resume` and pi's fork/clone behavior simply restore whatever entries already exist in the target session. The user opts into plan mode explicitly.
 
 ## Enforcement
 
@@ -32,19 +34,28 @@ A `tool_result` hook watches successful `edit`/`write` calls. If the written pat
 
 There is no dedicated `write_plan` tool — the agent uses ordinary `write`/`edit` and the location decides whether it counts as a plan.
 
+## Model context
+
+Plan guidance is delivered dynamically per turn, never persisted into LLM context. A `context` hook filters mode announcements persisted by older plot versions from outgoing model context.
+
+- **execute mode:** adds no plot system text at all.
+- **plan mode:** `before_agent_start` appends a concise, strong instruction to the system prompt for that turn only — it is investigation/planning, not implementation; `edit`/`write` are restricted to `.pi/plans/`; read-only exploration tools may all be used; the plan must be a self-contained handoff (goal/constraints, findings, exact files/symbols, ordered changes, validation/tests, risks/open questions); and when ready the model should save the plan and tell the **user** to run `/approve` (the model cannot invoke `/approve` itself). If a current plan exists, its path and content are included so it can be revised. Missing or unreadable tracked plans are reported in the guidance rather than aborting the turn.
+
 ## Commands
 
 ### `/plan`
 
-Toggles between plan and execute. Appends a `plot-mode` entry and sends a `customType: "plot"` system message (`triggerTurn: false`) announcing the change. Also bound to `Shift+Tab`.
+Toggles between plan and execute. It appends a `plot-mode` entry and updates the widget — nothing else. Toggling does **not** inject a message into LLM context and does **not** trigger a model turn; plan-mode guidance is delivered dynamically per turn (see [Model context](#model-context)). Also bound to `Shift+Tab`.
 
 ### `/approve`
 
-Plan mode only. Reads the current plan file, then calls `ctx.newSession({ parentSession, withSession })` to start a fresh child session. `withSession` only calls `sendUserMessage(planContent)` — the child session has no `plot-mode` entries, so `getMode` returns `execute` by default, and `session_start` re-runs `applyMode` from a fresh extension load.
+Plan mode only. Reads the current plan file, then calls `ctx.newSession({ parentSession, withSession })` to start a fresh child session. If there is no current plan path, or the tracked plan cannot be read, `/approve` notifies the user and aborts.
 
-The `withSession` callback must not call methods on the outer `pi` (e.g. `pi.appendEntry`) — that `pi` is bound to the parent `AgentSession`, which pi disposes before invoking the callback. Use `replacementCtx` for anything that needs to target the child session.
+`withSession` sends a single user message: a kickoff that explains the plan was approved in a separate planning session, that this is execute mode with full normal tool access, that the agent should inspect current repository state before editing (and adapt if assumptions no longer match), then implement the plan and run relevant validation, followed by the plan content. The plan content is captured as a plain string before `ctx.newSession` runs; inside `withSession`, only `replacementCtx` is used.
 
-If there's no current plan path, `/approve` notifies the user and aborts.
+The child session has no `plot-mode` entries, so `getMode` returns `execute` by default, and `session_start` re-runs `applyMode` from a fresh extension load.
+
+The `withSession` callback must not call methods on the outer `pi` (e.g. `pi.appendEntry`) or the outer command `ctx` — that `pi` is bound to the parent `AgentSession`, which pi disposes before invoking the callback. Use `replacementCtx` for anything that needs to target the child session.
 
 ## Requirements
 

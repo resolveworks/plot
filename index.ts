@@ -1,5 +1,4 @@
 import type { CustomEntry, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import { readFile } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
@@ -23,6 +22,25 @@ function planPathFromToolInput(input: unknown, ctx: ExtensionContext): string | 
   return absolutePath.startsWith(plansDir + sep) ? absolutePath : undefined;
 }
 
+const PLAN_INSTRUCTIONS = `# Plan mode active
+
+You are in PLAN mode: investigate and plan, do not implement. Produce a plan that a separate, fresh implementation agent can execute from a cold start.
+
+Rules
+- edit/write are restricted: you may only write files under .pi/plans/. Edits anywhere else are blocked.
+- All read-only exploration tools are available (read, bash, grep, find, ls, and any others) — use whichever helps you investigate, not just read and bash.
+- Do not implement the change or modify source files now.
+
+The plan you write to .pi/plans/<name>.md must be a self-contained handoff. Include:
+- Goal and constraints (what "done" looks like).
+- Key findings from exploration (architecture, relevant behavior, gotchas).
+- Exact files and symbols to change, with paths.
+- Ordered, concrete implementation steps.
+- How to validate (tests to run or add, type-checks, build steps).
+- Risks, assumptions, and open questions for the reviewer.
+
+When the plan is ready: SAVE it under .pi/plans/, then tell the USER to review it and run /approve. You cannot run /approve yourself — only the user can approve and start the implementation session.`;
+
 export default function plot(pi: ExtensionAPI) {
   function getMode(ctx: ExtensionContext): Mode {
     return findLatest<{ mode?: Mode }>(ctx, "plot-mode")?.mode ?? "execute";
@@ -33,36 +51,30 @@ export default function plot(pi: ExtensionAPI) {
   }
 
   function applyMode(mode: Mode, planPath: string | undefined, ctx: ExtensionContext) {
-    const label = mode === "plan" ? "Plan mode" : "Normal mode";
+    const label = mode === "plan" ? "Plan mode" : "Execute mode";
     const text = planPath ? `${label} (${relative(ctx.cwd, planPath)})` : label;
     ctx.ui.setWidget("plot", [ctx.ui.theme.fg("accent", text)]);
   }
 
-  async function buildPlanMessage(ctx: ExtensionContext): Promise<string> {
-    const base =
-      "[Plan mode active] You may only edit/write files under .pi/plans/. Use read and bash freely to explore. When the plan is ready, run /approve.";
+  // Dynamic, per-turn plan-mode context appended to the system prompt.
+  async function buildPlanSystemContext(ctx: ExtensionContext): Promise<string> {
     const planPath = getCurrentPlanPath(ctx);
-    if (!planPath) return base;
-    const content = await readFile(planPath, "utf8");
-    return `${base}\n\nYou are working on plan: ${relative(ctx.cwd, planPath)}\n\n${content}`;
+    if (!planPath) return PLAN_INSTRUCTIONS;
+
+    const rel = relative(ctx.cwd, planPath);
+    try {
+      const content = await readFile(planPath, "utf8");
+      return `${PLAN_INSTRUCTIONS}\n\nCurrent plan (${rel}) — revise it in place or extend it:\n\n${content}`;
+    } catch (error) {
+      return `${PLAN_INSTRUCTIONS}\n\nThe tracked plan (${rel}) could not be read: ${errorMessage(error)}. Save a new plan before asking the user to approve it.`;
+    }
   }
 
-  async function togglePlanMode(ctx: ExtensionContext) {
+  // Persisted state + UI only. No model turn is triggered by toggling.
+  function togglePlanMode(ctx: ExtensionContext) {
     const mode = getMode(ctx) === "plan" ? "execute" : "plan";
     pi.appendEntry("plot-mode", { mode });
     applyMode(mode, getCurrentPlanPath(ctx), ctx);
-
-    pi.sendMessage(
-      {
-        customType: "plot",
-        content:
-          mode === "plan"
-            ? await buildPlanMessage(ctx)
-            : "[Plan mode ended] Full file access restored.",
-        display: false,
-      },
-      { triggerTurn: false },
-    );
   }
 
   pi.registerCommand("plan", {
@@ -84,13 +96,22 @@ export default function plot(pi: ExtensionAPI) {
         return;
       }
 
-      const planContent = await readFile(planPath, "utf8");
+      let planContent: string;
+      try {
+        planContent = await readFile(planPath, "utf8");
+      } catch (error) {
+        ctx.ui.notify(`Could not read the current plan: ${errorMessage(error)}`, "error");
+        return;
+      }
+
+      // Capture plain data before replacement; withSession must only use replacementCtx.
+      const kickoff = buildKickoffMessage(planContent);
       const parentSession = ctx.sessionManager.getSessionFile();
 
       await ctx.newSession({
         parentSession: parentSession ?? undefined,
         withSession: async (replacementCtx) => {
-          await replacementCtx.sendUserMessage(`implement this plan:\n\n${planContent}`);
+          await replacementCtx.sendUserMessage(kickoff);
         },
       });
     },
@@ -109,7 +130,7 @@ export default function plot(pi: ExtensionAPI) {
     return {
       block: true,
       reason:
-        "Plan mode: only files under .pi/plans/ can be edited or written. Use read and bash to explore code, then write your plan to .pi/plans/<name>.md, then run /approve.",
+        "Plan mode: only files under .pi/plans/ can be edited or written. Use read-only tools (read, bash, grep, find, etc.) to explore code, then write your plan to .pi/plans/<name>.md, then ask the user to run /approve.",
     };
   });
 
@@ -124,57 +145,48 @@ export default function plot(pi: ExtensionAPI) {
     applyMode(getMode(ctx), absolutePath, ctx);
   });
 
-  pi.on("session_start", async (event, ctx) => {
-    // Carry over plan state from previous session on /new
-    if (event.reason === "new" && event.previousSessionFile) {
-      try {
-        const prevSession = await SessionManager.open(event.previousSessionFile);
-        const branch = prevSession.getBranch();
+  // Hide announcements persisted by older plot versions. Current mode guidance
+  // comes exclusively from before_agent_start below.
+  pi.on("context", async (event) => ({
+    messages: event.messages.filter(
+      (message) => message.role !== "custom" || message.customType !== "plot",
+    ),
+  }));
 
-        let inheritedMode: Mode | undefined;
-        let inheritedPlanPath: string | undefined;
+  // Inject dynamic plan-mode guidance per turn. Execute mode adds nothing.
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (getMode(ctx) !== "plan") return;
+    const planContext = await buildPlanSystemContext(ctx);
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${planContext}`,
+    };
+  });
 
-        for (let i = branch.length - 1; i >= 0; i--) {
-          const entry = branch[i];
-          if (entry.type === "custom") {
-            const ce = entry as CustomEntry;
-            if (!inheritedMode && ce.customType === "plot-mode") {
-              inheritedMode = (ce.data as { mode?: Mode })?.mode;
-            }
-            if (!inheritedPlanPath && ce.customType === "plot-plan") {
-              inheritedPlanPath = (ce.data as { path?: string })?.path;
-            }
-            if (inheritedMode && inheritedPlanPath) break;
-          }
-        }
-
-        if (inheritedMode) {
-          pi.appendEntry("plot-mode", { mode: inheritedMode });
-        }
-        if (inheritedPlanPath) {
-          pi.appendEntry("plot-plan", { path: inheritedPlanPath });
-        }
-      } catch {
-        // Previous session unreadable — start fresh, no-op
-      }
-    }
-
+  pi.on("session_start", async (_event, ctx) => {
+    // Fresh sessions (/new, /approve child) start in execute mode by default:
+    // they have no plot-mode entries, so getMode returns "execute". Resume/fork
+    // restore whatever state already exists in that session. We do NOT copy state
+    // from previousSessionFile.
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
-
-    // Inform the model about plan mode and current plan
-    if (getMode(ctx) === "plan") {
-      pi.sendMessage(
-        {
-          customType: "plot",
-          content: await buildPlanMessage(ctx),
-          display: false,
-        },
-        { triggerTurn: false },
-      );
-    }
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     applyMode(getMode(ctx), getCurrentPlanPath(ctx), ctx);
   });
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildKickoffMessage(planContent: string): string {
+  return `A plan was approved in a separate planning session. You are now in a fresh EXECUTE-mode session with full normal tool access (edit, write, bash, read, grep, and any others).
+
+Before changing anything, inspect the current repository state (e.g. \`git status\`, \`git diff\`, and the files the plan touches) so you understand what actually exists right now. This plan was drafted during planning, so its assumptions may not match the current code — verify against the real state of the repository and adapt rather than following it blindly.
+
+Then implement the plan, and run the relevant validation (tests, type-checks, linters, build) to confirm your changes work.
+
+=== APPROVED PLAN ===
+
+${planContent}`;
 }
